@@ -1,0 +1,33 @@
+---
+title: "Visualizing Results"
+output: html_notebook
+---
+
+
+```{r, warning=FALSE, message=FALSE}
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(knitr)
+
+INPUT_DIR <- here::here('post_pic')
+monthly_regional <- read.csv(file.path(INPUT_DIR, 'monthly_regional_C_flux.csv'), stringsAsFactors = FALSE)
+```
+
+
+```{r}
+monthly_regional %>%  
+  filter(year %in% 2005:2014) %>% 
+  # Average over the months 
+  group_by(month, units, variable, model, experiment, ensemble, box) %>%  
+  summarise(value = mean(value)) %>%  
+  ungroup %>% 
+  ggplot(aes(month, value, color = model, group = interaction(model, ensemble))) + 
+  geom_line() + 
+  facet_wrap("box") + 
+  labs(title = 'Average Monthly Rh Flux from 2005 to 2014', 
+       y = unique(monthly_regional$units), 
+       x = 'Month')
+```
+
+

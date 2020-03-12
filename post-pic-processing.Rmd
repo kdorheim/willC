@@ -1,0 +1,198 @@
+---
+title: "Rh Post Pic Processing"
+output: html_notebook
+---
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(knitr)
+
+INPUT_DIR  <- here::here('pic_data')
+OUTPUT_DIR <- here::here('post_pic'); dir.create(OUTPUT_DIR, showWarnings = FALSE)
+  
+monthly_hemi  <- readRDS(file.path(INPUT_DIR, "mon_regional_fldmean.rds")) 
+yr_5degree    <- read.csv(file.path(INPUT_DIR, "yr_5degress_fldmean.csv"))
+```
+
+
+## Objectives 
+
+1. Quality control of the results 
+2. Convert from rates to flux values 
+
+### Define Helpful Functions 
+
+```{r}
+# Remove the incomplete experiments, these are the runs that have less results 
+# than the threshold.
+# Args
+#   input: a dataframe of CMIP data to discard incompelte runs from. 
+#   threshold: the min number of years required  to be considered a complete run, the default value is set to 100 
+# Returns: a data frame of CMIP data that only contains complete runs 
+remove_incomplete_experiments <- function(input, threshold = 100){
+  
+  # Check inputs 
+  req_cols <- c('year', 'variable', 'experiment', 'model', 'ensemble')
+  assertthat::assert_that(all(req_cols %in% names(input)), msg = 'Missing required column names')
+  
+  input %>% 
+    group_by(variable, experiment, model, ensemble) %>% 
+    summarise(n_year = n_distinct(year)) %>% 
+    ungroup() %>%  
+    filter(n_year < threshold) %>% 
+    select(variable, experiment, model, ensemble) -> 
+    incomplete_runs
+  
+  message(nrow(incomplete_runs), ' instances have incomplete results')
+  
+  anti_join(input, incomplete_runs, by = c("variable", "experiment", "model", "ensemble"))
+  
+}
+
+# Convert from a per seconds rate to the tota flux per month  
+# Args 
+#   input: a data frame of monthly data to convert from the rate to the flux
+# Returns: a data frame of monhtly total carbon flux 
+convert_seconds_month <- function(input){
+  
+  # Check inputs 
+  req_cols <- c('month', 'value', 'units')
+  assertthat::assert_that(all(req_cols %in% names(input)), msg = 'Missing required column names')
+  assertthat::assert_that(unique(grepl(pattern = 's-1', x = input[['units']])), msg = 'Unepected units')
+  
+  # Calculate the seconds per month and convert units, take the days per month times the number of hours in a day 
+  # times the number of minuter per hour times the number of seconds per hour. 
+  seconds_in_month <- lubridate::days_in_month(input[['month']]) * 24 * 60 * 60
+  input[['value']] <- input[['value']] * seconds_in_month
+  input[['units']] <-  gsub(pattern = 's-1', replacement = 'month-1', x = input[['units']])
+  
+  input
+}
+
+# Convert from a per seconds rate to a per year rate 
+# Args 
+#   input: a data frame of annual average data to convert from the rate to the flux
+# Returns: a data frame of annual total carbon flux 
+convert_seconds_year <- function(input){
+  
+  # Check inputs 
+  req_cols <- c('month', 'value', 'units')
+  assertthat::assert_that(all(req_cols %in% names(input)), msg = 'Missing required column names')
+  assertthat::assert_that(unique(grepl(pattern = 's-1', x = input[['units']])), msg = 'Unepected units')
+  
+  # Calculate the seconds per year and convert units, take the days per 
+  # month times the number of hours in a day. 
+  input[['value']] <- input[['value']] * 24 * 60 * 60 * 365
+  input[['units']] <-  gsub(pattern = 's-1', replacement = 'year-1', x = input[['units']])
+  
+  input
+}
+
+# Convert from flux per m2 to the total flux 
+# Args 
+#   input: a data frame of per meter data to convert to a total 
+# Returns: a data frame of total carbon flux from a given area
+convert_meter_total <- function(input){
+  
+  # Check inputs 
+  req_cols <- c('area', 'value', 'units')
+  assertthat::assert_that(all(req_cols %in% names(input)), msg = 'Missing required column names')
+  assertthat::assert_that(unique(grepl(pattern = 'm-2', x = input[['units']])), msg = 'Unepected units')
+  
+  # Convert from kg to peta grams 
+  input[['value']] <- input[['value']] / 1e12
+  input[['units']] <-  gsub(pattern = 'm-2', replacement = '', x = input[['units']])
+  input 
+}
+
+# Convert from kg to Pg
+# Args 
+#   input: a data frame flux (kg)
+# Returns: a data frame of flux in Pg  
+convert_kg_Pg <- function(input){
+  
+  # Check inputs 
+  req_cols <- c('value', 'units')
+  assertthat::assert_that(all(req_cols %in% names(input)), msg = 'Missing required column names')
+  assertthat::assert_that(unique(grepl(pattern = 'kg', x = input[['units']])), msg = 'Unepected units')
+  
+  
+  input[['value']] <- input[['value']] * input[['area']]
+  input[['units']] <-  gsub(pattern = 'kg', replacement = 'Pg', x = input[['units']])
+  input[['units']] <-  gsub(pattern = ' ', replacement = '', x = input[['units']])
+  
+  input  
+}
+
+
+convert_CO2_C <- function(input, models_to_convert){
+  
+  req_cols <- c('value', 'units', 'model')
+  assertthat::assert_that(all(req_cols %in% names(input)), msg = 'Missing required column names')
+  
+  good_data       <- input[!input[['model']] %in% models_to_convert, ]
+  to_convert_data <- input[input[['model']] %in% models_to_convert, ]
+  to_convert_data[['value']] <-  to_convert_data[['value']] * (12.01/44.01)
+  rbind(good_data, to_convert_data)
+  
+}
+
+
+```
+
+
+
+### monthly hemisphere
+```{r}
+# What models have incomplete years? For a given experiment / variable / ensemble member there 
+# is data for less than 100 years. 
+good_hemi_data <- remove_incomplete_experiments(monthly_hemi)
+```
+
+Convert from a rate to to total flux! 
+
+```{r}
+good_hemi_data %>%
+  # Convert flux from  per seconds to per month
+  convert_seconds_month %>% 
+  # Convert from per meter flux to total flux
+  convert_meter_total %>%
+  # Convert from kg to Pg
+  convert_kg_Pg  %>% 
+  # Convert data we suspect of being reported in CO2 to C
+  convert_CO2_C(models_to_convert = c('CNRM-CM6-1', "CNRM-CM6-1-HR")) -> 
+  hemi_flux
+```
+
+
+
+```{r}
+hemi_flux %>% 
+  filter(year %in% 1950:1960) %>% 
+  ggplot() +
+  geom_line(aes(datetime, value, color = model, group = interaction(model, ensemble, box))) +
+  facet_wrap('box', scales = 'free', ncol = 1) + 
+  labs(title = 'Regional C flux from Rh 1950 to 1960', 
+       y = 'Pg C per month', 
+       x = 'Month')
+```
+
+Alrightly if this data looks good then it is pretty good to save it. 
+
+```{r}
+hemi_flux %>%  
+  select(datetime, year, month, value, units, variable, model, experiment, ensemble, box) %>%  
+  write.csv(file = file.path(OUTPUT_DIR, 'monthly_regional_C_flux.csv'), row.names = FALSE)
+```
+
+
+
+### annual flux data by lat 
+
+```{r}
+# I will need to convert from seconds to year and then area and then the C to CO2 
+# then I will want to do some sort of quality check, make sure that the global aggergate value is close. 
+```
+
